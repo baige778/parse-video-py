@@ -1,0 +1,27 @@
+services:
+  parse-video-py:
+    build:
+      context: .
+      args:
+        # 国内构建加速：设置环境变量后 docker compose 会自动传入
+        #   $env:APT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn"
+        #   $env:PLAYWRIGHT_DOWNLOAD_HOST="https://cdn.npmmirror.com/binaries/playwright"
+        APT_MIRROR: ${APT_MIRROR:-}
+        PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-}
+        # 容器默认不安装无头浏览器（避免 apt 网络问题）；抖音主路径走登录 Cookie。
+        # 确实需要浏览器兜底时：$env:INSTALL_BROWSER="1" 再构建，并去掉下面的 NO_BROWSER 注释
+        INSTALL_BROWSER: ${INSTALL_BROWSER:-0}
+    container_name: parse-video-py
+    ports:
+      - "8000:8000"
+    environment:
+      # 抖音登录 Cookie 文件（挂载在 ./data 目录下）
+      - PARSE_VIDEO_PY_DOUYIN_COOKIES=/data/douyin_cookies.txt
+      # 容器内未安装浏览器，禁用浏览器兜底（Cookie 失效时解析会报错并提示刷新 Cookie）
+      - PARSE_VIDEO_PY_DOUYIN_NO_BROWSER=1
+      # Web 服务 Basic Auth（可选）
+      # - PARSE_VIDEO_USERNAME=admin
+      # - PARSE_VIDEO_PASSWORD=change-me
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

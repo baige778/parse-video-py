@@ -1,0 +1,14 @@
+.git
+.gitignore
+.github
+.claude
+.codex
+**/__pycache__
+*.pyc
+*.egg-info
+tests
+docs
+data
+douyin_cookies.txt
+douyin_cookies.json
+.douyin_profile
