@@ -2748,7 +2748,7 @@
             <p>
                 <strong>温馨提示: </strong><br/>
                 1. 粘贴视频地址时<u>无需删除文案</u><small> 但如果视频链接正确但解析失败请删掉文案后重试</small><br/>
-                2. 点击下载视频跳转时, 可能会被对应网站识别, 报 <u>403 Forbidden</u>, 可以在 下载视频 按钮, 右键复制链接地址, 新开浏览器标签页打开即可
+                2. 下载视频/图片/音频已通过后端代理（自动带 Referer 绕过防盗链），无需手动复制链接
             </p>
             <hr/>
         </div>
@@ -2865,16 +2865,16 @@ function setValue() {
         });
 
         let successHtml = '<h4>' + jsonObj.data.title + ' </h4>';
-        successHtml += '<a class="mdui-btn mdui-btn-raised" href="' + jsonObj.data.cover_url + '" target="_blank" download="video" referrerpolicy="no-referrer"><span>下载封面</span></a>';
+        successHtml += '<a class="mdui-btn mdui-btn-raised" href="/download?url=' + encodeURIComponent(jsonObj.data.cover_url) + '" target="_blank" download="cover"><span>下载封面</span></a>';
 
         // 如果video_url不为空, 则显示下载视频按钮
         if (jsonObj.data.video_url != "") {
-            successHtml += '<a class="mdui-btn mdui-btn-raised" href="' + jsonObj.data.video_url + '" target="_blank" download="video" referrerpolicy="no-referrer"><span>下载视频</span></a>';
+            successHtml += '<a class="mdui-btn mdui-btn-raised" href="/download?url=' + encodeURIComponent(jsonObj.data.video_url) + '" target="_blank" download="video"><span>下载视频</span></a>';
         }
 
         // 如果music_url不为空, 则显示下载音频按钮
         if (jsonObj.data.music_url && jsonObj.data.music_url != "") {
-            successHtml += '<a class="mdui-btn mdui-btn-raised" href="' + jsonObj.data.music_url + '" target="_blank" download="audio" referrerpolicy="no-referrer"><span>下载音频</span></a>';
+            successHtml += '<a class="mdui-btn mdui-btn-raised" href="/download?url=' + encodeURIComponent(jsonObj.data.music_url) + '" target="_blank" download="audio"><span>下载音频</span></a>';
         }
 
         // 如果 jsonObj.data.images 是数组， 并且长度大于0, 则img展示图片
@@ -2900,7 +2900,7 @@ function setValue() {
                 successHtml += '<img src="' + item.url + '" referrerpolicy="no-referrer" style="width: 160px; display: block; margin-bottom: 0.5em;"/>';
                 // 如果 item.live_photo_url 不为空， 显示下载按钮
                 if (item.live_photo_url) {
-                    successHtml += '<a class="mdui-btn mdui-btn-raised" href="' + item.live_photo_url + '" target="_blank" download="video" referrerpolicy="no-referrer" style="text-transform: none;"><span>下载LivePhoto</span></a>';
+                    successHtml += '<a class="mdui-btn mdui-btn-raised" href="/download?url=' + encodeURIComponent(item.live_photo_url) + '" target="_blank" download="video" style="text-transform: none;"><span>下载LivePhoto</span></a>';
                 }
 
                 successHtml += '</div>';
