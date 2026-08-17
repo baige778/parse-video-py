@@ -1,6 +1,7 @@
 import dataclasses
 import os
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -10,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi_mcp import FastApiMCP
 
 from parse_video_py import VideoSource, parse_video_id, parse_video_share_url
+from parse_video_py.douyin_login import get_douyin_login_manager
 from parse_video_py.utils import extract_url
 
 
@@ -21,7 +23,14 @@ def _get_templates_dir() -> str:
     raise FileNotFoundError("templates 目录未找到")
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    # 应用退出时关闭抖音登录浏览器，释放内存
+    await get_douyin_login_manager().shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
 
 mcp = FastApiMCP(app)
 mcp.mount_http()
@@ -109,6 +118,24 @@ async def video_id_parse(source: VideoSource, video_id: str):
             "code": 500,
             "msg": f"{type(err).__name__}: {err}",
         }
+
+
+@app.get("/douyin/login/qrcode", dependencies=_auth_dependency)
+async def douyin_login_qrcode():
+    """发起抖音扫码登录，返回二维码图片（文件路径 + base64）。"""
+    return await get_douyin_login_manager().start_qrcode()
+
+
+@app.get("/douyin/login/status", dependencies=_auth_dependency)
+async def douyin_login_status():
+    """查询抖音扫码登录状态。"""
+    return await get_douyin_login_manager().status()
+
+
+@app.get("/douyin/login/cancel", dependencies=_auth_dependency)
+async def douyin_login_cancel():
+    """取消当前抖音扫码登录并关闭浏览器。"""
+    return await get_douyin_login_manager().cancel()
 
 
 mcp.setup_server()
