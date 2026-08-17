@@ -8,9 +8,6 @@ Python短视频去水印, 视频目前支持25个平台, 图集目前支持5个�
 > 1. 出现解析失败可在 issue 中提问，请提供可用于复现的平台信息、分享链接.
 > 2. 使用时, 请尽量使用app分享链接, 电脑网页版未做充分测试.
 
-# 其他语言版本
-- [Golang版本](https://github.com/baige778/parse-video)
-
 ---
 
 # MCP 支持
@@ -144,7 +141,7 @@ docker pull baige778/parse-video-py
 
 ### 运行 docker 容器, 端口 8000
 ```bash
-docker run -d -p 8000:8000 baige778/parse-video-py
+docker run -d -p 8000:8000 --name parse-video baige778/parse-video-py
 ```
 
 ### Docker Compose 一键部署（推荐，新机器只需要这一节）
@@ -230,12 +227,12 @@ git push origin main
 
 ### 运行docker容器，开启basic auth认证
 ```bash
-docker run -d -p 8000:8000 -e PARSE_VIDEO_USERNAME=username -e PARSE_VIDEO_PASSWORD=password baige778/parse-video-py
+docker run -d -p 8000:8000 --name parse-video -e PARSE_VIDEO_USERNAME=username -e PARSE_VIDEO_PASSWORD=password baige778/parse-video-py
 ```
 
 ### 运行docker容器，设置代理
 ```bash
-docker run -d -p 8000:8000 -e PARSE_VIDEO_PROXY=http://proxy.example.com:端口 baige778/parse-video-py
+docker run -d -p 8000:8000 --name parse-video -e PARSE_VIDEO_PROXY=http://proxy.example.com:端口 baige778/parse-video-py
 ```
 
 # 查看前端页面

@@ -97,10 +97,10 @@ pytest --cov=parse_video_py
 ### Docker
 ```bash
 # Build and run
-docker run -d -p 8000:8000 baige778/parse-video-py
+docker run -d -p 8000:8000 --name parse-video baige778/parse-video-py
 
 # Run with basic auth
-docker run -d -p 8000:8000 -e PARSE_VIDEO_USERNAME=username -e PARSE_VIDEO_PASSWORD=password baige778/parse-video-py
+docker run -d -p 8000:8000 --name parse-video -e PARSE_VIDEO_USERNAME=username -e PARSE_VIDEO_PASSWORD=password baige778/parse-video-py
 ```
 
 ## API Endpoints
