@@ -13,7 +13,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from fastapi_mcp import FastApiMCP
 
-from parse_video_py import VideoSource, parse_video_id, parse_video_share_url
+from parse_video_py import VideoSource, douyin_browser, parse_video_id, parse_video_share_url
 from parse_video_py.douyin_login import get_douyin_login_manager
 from parse_video_py.utils import create_async_client, extract_url
 
@@ -243,6 +243,20 @@ async def douyin_login_status():
 async def douyin_login_cancel():
     """取消当前抖音扫码登录并关闭浏览器。"""
     return await get_douyin_login_manager().cancel()
+
+
+@app.get("/douyin/login/logged_in", dependencies=_auth_dependency)
+async def douyin_login_logged_in():
+    """查询常驻浏览器 profile 当前是否已登录抖音（供插件 UI 显示登录状态）。"""
+    try:
+        logged_in = await douyin_browser.is_logged_in()
+    except Exception as exc:
+        return {
+            "code": 200,
+            "msg": "error",
+            "data": {"logged_in": False, "error": f"{type(exc).__name__}: {exc}"},
+        }
+    return {"code": 200, "msg": "ok", "data": {"logged_in": logged_in}}
 
 
 mcp.setup_server()

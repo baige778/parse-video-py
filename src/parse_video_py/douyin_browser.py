@@ -260,6 +260,12 @@ async def _extract_from_context(context, detail_url: str) -> dict:
             await page.wait_for_timeout(500)
         if "item" in captured:
             return captured["item"]
+        # 页面已打开但未捕获到详情接口：区分「登录态失效」与「风控/验证码」，
+        # 给上层（插件）一个可识别的失效信号，便于提醒用户重新扫码登录。
+        cookies = await context.cookies()
+        names = {c.get("name") for c in cookies if isinstance(c, dict)}
+        if not (set(_LOGIN_COOKIE_KEYS) & names):
+            raise RuntimeError("抖音登录态已失效，请重新扫描二维码登录")
         raise RuntimeError("页面已打开，但未捕获到视频详情接口（可能触发验证码）")
     finally:
         try:
