@@ -62,13 +62,28 @@ def _log(tag: str, msg: str) -> None:
 # ---- 抖音解析可配置项（环境变量；默认值针对容器/常见场景） ----
 _COOKIE_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_COOKIE_TIMEOUT", 5)
 _COOKIE_RETRIES = _env_int("PARSE_VIDEO_PY_DOUYIN_COOKIE_RETRIES", 1)
-_BROWSER_GOTO_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_GOTO_TIMEOUT", 15000)
-_BROWSER_POLL_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_POLL_TIMEOUT", 10000)
+_BROWSER_GOTO_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_GOTO_TIMEOUT", 10000)
+_BROWSER_POLL_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_POLL_TIMEOUT", 8000)
 _BROWSER_CHANNEL = (os.environ.get("PARSE_VIDEO_PY_DOUYIN_BROWSER_CHANNEL") or "").strip()
 # 浏览器常驻复用：headless 模式复用单例，避免每请求冷启动；0 关闭。
 _BROWSER_REUSE = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_REUSE", 1)
 _BROWSER_REUSE_TTL = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_REUSE_TTL", 600)
 _BROWSER_REUSE_MAX = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_REUSE_MAX", 100)
+# 常驻浏览器锁等待上限（秒）：超过即认定浏览器卡死并强制回收，避免死锁拖垮后续请求。
+_BROWSER_LOCK_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_LOCK_TIMEOUT", 20)
+# 无头失败后是否再用有头模式重试：容器/无显示环境应关闭（默认关闭）。
+_BROWSER_HEADED_RETRY = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_HEADED_RETRY", 0)
+
+# 低配内存环境（路由器/容器）下更稳的 Chromium 启动参数
+_BROWSER_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--no-first-run",
+    "--mute-audio",
+]
 
 
 def _first_non_webp(url_list) -> str:
@@ -275,7 +290,7 @@ def _get_reusable_context():
             try:
                 launch_kwargs = {
                     "headless": True,
-                    "args": ["--disable-blink-features=AutomationControlled"],
+                    "args": list(_BROWSER_ARGS),
                 }
                 if channel:
                     launch_kwargs["channel"] = channel
@@ -356,9 +371,19 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
 
     # 无头模式默认复用常驻浏览器，避免每请求冷启动（1~3s 开销）。
     if headless and _BROWSER_REUSE:
-        with _browser_lock:
+        # 加锁带超时：若上一个请求卡死在浏览器里超过阈值则强制回收，避免死锁拖垮后续所有请求。
+        if not _browser_lock.acquire(timeout=_BROWSER_LOCK_TIMEOUT):
+            _log(
+                "browser",
+                f"等待浏览器锁超过 {_BROWSER_LOCK_TIMEOUT}s，判定常驻浏览器卡死，强制回收",
+            )
+            _release_reusable_browser()
+            raise RuntimeError("常驻浏览器卡死，已回收，请重试")
+        try:
             context = _get_reusable_context()
             return _extract_from_context(context, detail_url)
+        finally:
+            _browser_lock.release()
 
     # 有头模式（或禁用复用）：保持每次启动/关闭的独立浏览器。
     last_error = "无法启动任何可用浏览器"
@@ -367,7 +392,7 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
             try:
                 launch_kwargs = {
                     "headless": headless,
-                    "args": ["--disable-blink-features=AutomationControlled"],
+                    "args": list(_BROWSER_ARGS),
                 }
                 if channel:
                     launch_kwargs["channel"] = channel
@@ -392,7 +417,7 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
 
 
 def _extract_item_with_retry(video_id: str, headed: bool = False) -> dict:
-    """优先无头模式，失败后使用有头模式（会短暂弹出浏览器窗口）。"""
+    """优先无头模式；失败后可选用有头重试（容器/无显示环境默认关闭）。"""
     started = time.monotonic()
     if headed:
         item = _douyin_browser_extract(video_id, headless=False)
@@ -411,8 +436,13 @@ def _extract_item_with_retry(video_id: str, headed: bool = False) -> dict:
     except Exception as headless_exc:
         _log(
             "browser",
-            f"无头失败 耗时={time.monotonic() - started:.2f}s: {headless_exc}；转有头重试",
+            f"无头失败 耗时={time.monotonic() - started:.2f}s: {headless_exc}",
         )
+        # 回收可能已卡死/异常的常驻浏览器，保证下次冷启动是干净的
+        _release_reusable_browser()
+        if not _BROWSER_HEADED_RETRY:
+            raise
+        _log("browser", "转有头重试")
         item = _douyin_browser_extract(video_id, headless=False)
         _log(
             "browser",
