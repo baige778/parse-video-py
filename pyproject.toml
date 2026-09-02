@@ -1,6 +1,6 @@
 [project]
 name = "parse-video-py"
-version = "0.0.6"
+version = "0.0.7"
 description = "视频解析服务，支持 20+ 平台去水印解析"
 requires-python = ">=3.10"
 license = "MIT"
@@ -38,7 +38,6 @@ dev = [
 ]
 all = ["parse-video-py[web,cli]"]
 douyin = [
-    "curl_cffi>=0.7",
     "playwright>=1.40",
 ]
 

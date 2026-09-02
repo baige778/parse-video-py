@@ -2,6 +2,22 @@
 
 所有重要变更均会记录在此文件中。
 
+## [v0.0.7] - 2026-09-03
+
+### 新增功能
+
+- **持久化登录态浏览器（方案A）**：移除 Cookie 文件直连（抖音 ArgusSecurity 返回 "Uifid Not Found" 已失效），改为磁盘持久化 `user_data_dir` profile 的常驻 Chromium，长期持有并滚动刷新登录态 / `ttwid` / `UIFID` 等设备指纹
+- 解析与扫码登录共用同一 profile：扫码登录一次后，浏览器 profile 持久化登录态，后续解析直接复用，无需导出 Cookie
+
+### 优化改进
+
+- 浏览器状态改用异步 `asyncio` 统一管理，新增浏览器锁超时（默认 20s）与卡死强制回收，避免单请求卡死拖垮后续解析
+- 修复浏览器接口轮询超时单位 bug（毫秒被误当秒），轮询超时对齐为 8s
+- 清理已废弃的 Cookie 直连环境变量（`PARSE_VIDEO_PY_DOUYIN_COOKIES` / `_COOKIE_TIMEOUT` / `_COOKIE_RETRIES`），并移除 `curl_cffi` 依赖
+- 新增 `PARSE_VIDEO_PY_DOUYIN_PROFILE_DIR` 配置浏览器 profile 目录
+
+---
+
 ## [v0.0.5] - 2026-09-02
 
 ### 优化改进

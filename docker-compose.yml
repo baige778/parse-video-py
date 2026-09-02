@@ -12,9 +12,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # 抖音登录 Cookie / 二维码数据目录（挂载在 ./data 下）
+      # 抖音登录态 / 二维码数据目录，容器内持久化浏览器 profile 位于 /data/browser_profile
       - DOUYIN_DATA_DIR=/data
-      - PARSE_VIDEO_PY_DOUYIN_COOKIES=/data/douyin_cookies.txt
       # Web 服务 Basic Auth（可选）
       # - PARSE_VIDEO_USERNAME=admin
       # - PARSE_VIDEO_PASSWORD=change-me

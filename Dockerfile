@@ -14,9 +14,8 @@ ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST} \
     DEBIAN_FRONTEND=noninteractive \
     PIP_DEFAULT_TIMEOUT=100
 
-# 抖音数据目录（二维码 / Cookie），配合 docker compose 的 ./data:/data 挂载持久化
-ENV DOUYIN_DATA_DIR=/data \
-    PARSE_VIDEO_PY_DOUYIN_COOKIES=/data/douyin_cookies.txt
+# 抖音数据目录（二维码 / 浏览器 profile），配合 docker compose 的 ./data:/data 挂载持久化
+ENV DOUYIN_DATA_DIR=/data
 
 # 设置工作目录
 WORKDIR /app

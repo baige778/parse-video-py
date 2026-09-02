@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""抖音网页端扫码登录管理器（Playwright 异步版）
+"""抖音网页端扫码登录管理器（复用磁盘持久化常驻浏览器）
 
-能力：
-1. 启动无头 Chromium 打开抖音网页版，截取登录二维码；
-2. 后台轮询登录状态，登录成功后把 Cookie 导出到文件；
-3. 浏览器用完即关，及时释放内存。
+复用 douyin_browser 提供的磁盘持久化 user_data_dir profile：
+1. 在常驻 context 上打开抖音网页版，截取登录二维码；
+2. 后台轮询登录状态，扫码成功后登录态自动持久化到浏览器 profile，
+   后续解析直接复用，无需导出 Cookie。
 
 产物文件（默认 /data，可用 DOUYIN_DATA_DIR 覆盖）：
   douyin_qrcode.png   登录二维码图片
-  douyin_cookies.txt  Netscape 格式 Cookie（兼容 douyin_fallback.load_douyin_cookies）
+  douyin_cookies.txt  登录成功后导出的 Cookie（仅作调试/备用兼容）
 
 环境变量：
   DOUYIN_DATA_DIR        数据目录（默认 /data，不可写时回退到 ./data 或系统临时目录）
@@ -25,10 +25,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
-import tempfile
 import time
-from pathlib import Path
 from typing import Optional
+
+from . import douyin_browser
 
 _LOGIN_URL = "https://www.douyin.com/"
 
@@ -53,7 +53,6 @@ _LOGIN_TRIGGER_SELECTORS = (
 )
 
 # 二维码元素候选选择器（按优先级，宽高需 >= _QR_MIN_SIZE 才算命中）
-# 2025-08-17 实测：抖音登录弹窗中二维码是 div[class*=login] 下的第二个 img，src 为 base64 data URI
 _QR_SELECTORS = (
     "div[class*='login'] img",  # 抖音登录弹窗二维码（优先）
     "img[src*='qrcode']",
@@ -73,43 +72,15 @@ _DOUYIN_COOKIE_DOMAINS = ("douyin.com", "iesdouyin.com")
 _DEFAULT_TIMEOUT = 300
 _POLL_INTERVAL = 2.0
 
-_WIN_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-)
 
-
-def resolve_data_dir() -> Path:
-    """解析数据目录：优先 DOUYIN_DATA_DIR，其次 /data，再 ./data，最后系统临时目录。"""
-    candidates: list[str] = []
-    env_dir = os.environ.get("DOUYIN_DATA_DIR")
-    if env_dir:
-        candidates.append(env_dir)
-    candidates.extend(["/data", "./data"])
-    for raw in candidates:
-        if not raw:
-            continue
-        p = Path(raw)
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-            if os.access(p, os.W_OK):
-                return p
-        except OSError:
-            continue
-    return Path(tempfile.gettempdir()) / "douyin"
-
-
-_DATA_DIR = resolve_data_dir()
-QRCODE_PATH = _DATA_DIR / "douyin_qrcode.png"
-COOKIES_PATH = _DATA_DIR / "douyin_cookies.txt"
+QRCODE_PATH = douyin_browser.DATA_DIR / "douyin_qrcode.png"
+COOKIES_PATH = douyin_browser.DATA_DIR / "douyin_cookies.txt"
 
 
 class DouyinLoginManager:
     """单例式登录管理器：同一时间只允许一个登录会话。"""
 
     def __init__(self) -> None:
-        self._pw = None
-        self._browser = None
         self._context = None
         self._page = None
         self._state = "idle"  # idle / pending / success / expired / cancelled / failed
@@ -133,32 +104,21 @@ class DouyinLoginManager:
             if self._state == "pending":
                 return self._pending_payload("登录已在进行中")
 
-            await self._close_browser_locked()
+            await self._reset_locked()
             self._state = "failed"
             self._last_error = ""
             try:
-                await self._ensure_playwright_locked()
-                self._browser = await self._pw.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                    ],
-                )
-                self._context = await self._browser.new_context(
-                    locale="zh-CN",
-                    viewport={"width": 1280, "height": 800},
-                    user_agent=_WIN_UA,
-                )
-                self._page = await self._context.new_page()
+                async def body(ctx):
+                    self._context = ctx
+                    page = await ctx.new_page()
+                    self._page = page
+                    await self._open_login_qr(page)
+                    qr_element = await self._locate_qr_element(page)
+                    if qr_element is None:
+                        raise RuntimeError("未能定位到登录二维码元素（页面结构可能已变化）")
+                    return await qr_element.screenshot()
 
-                await self._open_login_qr()
-                qr_element = await self._locate_qr_element()
-                if qr_element is None:
-                    raise RuntimeError("未能定位到登录二维码元素（页面结构可能已变化）")
-
-                buf = await qr_element.screenshot()
+                buf = await douyin_browser.with_context(body)
                 QRCODE_PATH.write_bytes(buf)
 
                 self._state = "pending"
@@ -178,7 +138,7 @@ class DouyinLoginManager:
             except Exception as exc:
                 self._state = "failed"
                 self._last_error = f"{type(exc).__name__}: {exc}"
-                await self._close_browser_locked()
+                await self._reset_locked()
                 return {
                     "code": 500,
                     "msg": self._last_error,
@@ -191,11 +151,11 @@ class DouyinLoginManager:
             return self._status_payload_locked()
 
     async def cancel(self) -> dict:
-        """取消当前登录会话，关闭浏览器。"""
+        """取消当前登录会话，关闭登录页。"""
         async with self._lock:
             if self._state == "pending":
                 self._state = "cancelled"
-            await self._close_browser_locked()
+            await self._reset_locked()
             return {
                 "code": 200,
                 "msg": "已取消登录",
@@ -203,15 +163,10 @@ class DouyinLoginManager:
             }
 
     async def shutdown(self) -> None:
-        """应用退出时调用：关闭浏览器并停止 Playwright。"""
+        """应用退出时调用：关闭登录页并停止常驻浏览器。"""
         async with self._lock:
-            await self._close_browser_locked()
-            if self._pw is not None:
-                try:
-                    await self._pw.stop()
-                except Exception:
-                    pass
-                self._pw = None
+            await self._reset_locked()
+        await douyin_browser.shutdown()
 
     # ---------------- 内部实现 ----------------
 
@@ -232,26 +187,19 @@ class DouyinLoginManager:
         data = {"status": self._state, "elapsed": elapsed}
         if self._state == "success":
             data["cookie_path"] = str(COOKIES_PATH)
+            data["profile_dir"] = str(douyin_browser.PROFILE_DIR)
         if self._last_error:
             data["error"] = self._last_error
         msg = "暂无进行中的登录" if self._state == "idle" else "ok"
         return {"code": 200, "msg": msg, "data": data}
 
-    async def _ensure_playwright_locked(self) -> None:
-        if self._pw is None:
-            # 惰性导入：仅在真正启动登录时才要求安装 playwright
-            from playwright.async_api import async_playwright
-
-            self._pw = await async_playwright().start()
-
-    async def _open_login_qr(self) -> None:
-        page = self._page
+    async def _open_login_qr(self, page) -> None:
         await page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
         # 抖音首页可能自动弹出登录框，等待渲染
         await page.wait_for_timeout(2500)
 
         # 若二维码已直接出现，直接返回
-        if await self._locate_qr_element() is not None:
+        if await self._locate_qr_element(page) is not None:
             return
 
         # 尝试点击「登录」按钮
@@ -269,15 +217,15 @@ class DouyinLoginManager:
         # 等待二维码出现（最多 10s）
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if await self._locate_qr_element() is not None:
+            if await self._locate_qr_element(page) is not None:
                 return
             await page.wait_for_timeout(500)
 
-    async def _locate_qr_element(self):
+    async def _locate_qr_element(self, page):
         """在主页及各 iframe 中寻找二维码元素。"""
-        frames = [self._page]
+        frames = [page]
         try:
-            frames += [f for f in self._page.frames]
+            frames += [f for f in page.frames]
         except Exception:
             pass
 
@@ -301,7 +249,7 @@ class DouyinLoginManager:
         return None
 
     async def _watch_loop(self) -> None:
-        """后台轮询：登录成功导出 Cookie，失效/超时则关闭浏览器。"""
+        """后台轮询：登录成功即结束，失效/超时则关闭登录页。"""
         try:
             while True:
                 await asyncio.sleep(_POLL_INTERVAL)
@@ -316,40 +264,43 @@ class DouyinLoginManager:
                 if self._state == "pending":
                     self._state = "failed"
                     self._last_error = f"{type(exc).__name__}: {exc}"
-                    await self._close_browser_locked()
 
     async def _poll_once_locked(self) -> None:
-        """在持有锁的情况下轮询一次登录状态。"""
+        """在持有登录锁与浏览器锁的情况下轮询一次登录状态。"""
+        async def body(ctx):
+            cookies = await ctx.cookies()
+            if self._has_login_cookie(cookies):
+                self._save_cookies(cookies)
+                self._state = "success"
+                await self._close_page_locked()
+                return
+
+            if await self._is_qr_expired():
+                self._state = "expired"
+                self._last_error = "二维码已失效"
+                await self._close_page_locked()
+                return
+
+            if time.monotonic() - self._started_at >= self.timeout:
+                self._state = "expired"
+                self._last_error = "登录超时"
+                await self._close_page_locked()
+                return
+
         try:
-            cookies = await self._context.cookies()
+            await douyin_browser.with_context(body)
         except Exception as exc:
             self._state = "failed"
             self._last_error = f"{type(exc).__name__}: {exc}"
-            await self._close_browser_locked()
-            return
-
-        if self._has_login_cookie(cookies):
-            self._save_cookies(cookies)
-            self._state = "success"
-            await self._close_browser_locked()
-            return
-
-        if await self._is_qr_expired():
-            self._state = "expired"
-            await self._close_browser_locked()
-            return
-
-        if time.monotonic() - self._started_at >= self.timeout:
-            self._state = "expired"
-            self._last_error = "登录超时"
-            await self._close_browser_locked()
-            return
+            await self._close_page_locked()
 
     def _has_login_cookie(self, cookies) -> bool:
         names = {c.get("name") for c in cookies if isinstance(c, dict)}
         return any(k in names for k in _LOGIN_COOKIE_KEYS)
 
     async def _is_qr_expired(self) -> bool:
+        if self._page is None:
+            return False
         try:
             text = await self._page.inner_text("body")
         except Exception:
@@ -398,40 +349,22 @@ class DouyinLoginManager:
         except OSError:
             return ""
 
-    async def _close_browser_locked(self) -> None:
+    async def _reset_locked(self) -> None:
         # 取消后台轮询任务（避免取消当前任务本身）
         if self._watch_task is not None:
             current = asyncio.current_task()
             if self._watch_task is not current and not self._watch_task.done():
                 self._watch_task.cancel()
             self._watch_task = None
+        await self._close_page_locked()
 
-        for closer in (self._close_page, self._close_context, self._close_browser):
-            await closer()
-
-    async def _close_page(self) -> None:
+    async def _close_page_locked(self) -> None:
         if self._page is not None:
             try:
                 await self._page.close()
             except Exception:
                 pass
             self._page = None
-
-    async def _close_context(self) -> None:
-        if self._context is not None:
-            try:
-                await self._context.close()
-            except Exception:
-                pass
-            self._context = None
-
-    async def _close_browser(self) -> None:
-        if self._browser is not None:
-            try:
-                await self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
 
 
 _manager: Optional[DouyinLoginManager] = None
