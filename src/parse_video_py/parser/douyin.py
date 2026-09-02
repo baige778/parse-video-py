@@ -1,9 +1,39 @@
 import json
+import os
 import re
+import time
+from typing import Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from ..utils import create_async_client
 from .base import BaseParser, ImgInfo, VideoAuthor, VideoInfo
+
+
+def _env_int(name: str, default: int) -> int:
+    """从环境变量读取整数配置，解析失败时回退默认值。"""
+    try:
+        return int((os.environ.get(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+# ---- 抖音解析结果缓存（进程内，TTL 过期自动失效；降低重复解析与 403 频率） ----
+_CACHE_TTL = _env_int("PARSE_VIDEO_PY_DOUYIN_CACHE_TTL", 300)
+_video_cache: Dict[str, Tuple[float, VideoInfo]] = {}
+
+
+def _cache_get(video_id: str):
+    if not video_id or _CACHE_TTL <= 0:
+        return None
+    item = _video_cache.get(video_id)
+    if item and time.monotonic() - item[0] < _CACHE_TTL:
+        return item[1]
+    return None
+
+
+def _cache_set(video_id: str, info: VideoInfo) -> None:
+    if video_id and _CACHE_TTL > 0:
+        _video_cache[video_id] = (time.monotonic(), info)
 
 
 class DouYin(BaseParser):
@@ -13,37 +43,64 @@ class DouYin(BaseParser):
 
     async def parse_share_url(self, share_url: str) -> VideoInfo:
         """解析分享链接；原生页面解析失败时自动启用风控兜底。"""
+        # 预先解析 video_id（短链仅请求一次），原生与兜底复用，
+        # 避免原生失败后兜底重复请求短链。
+        video_id = await self._resolve_video_id(share_url)
+
+        cached = _cache_get(video_id)
+        if cached is not None:
+            return cached
+
         try:
-            return await self._parse_share_url_native(share_url)
+            info = await self._parse_share_url_native(share_url, video_id=video_id)
         except Exception as native_exc:
             try:
-                from .douyin_fallback import (
-                    parse_douyin_fallback,
-                    resolve_douyin_video_id,
-                )
+                from .douyin_fallback import parse_douyin_fallback
 
-                video_id = await resolve_douyin_video_id(share_url)
-                return await parse_douyin_fallback(video_id)
+                if not video_id:
+                    from .douyin_fallback import resolve_douyin_video_id
+
+                    video_id = await resolve_douyin_video_id(share_url)
+                info = await parse_douyin_fallback(video_id)
             except Exception as fb_exc:
                 raise RuntimeError(
                     f"抖音原生解析失败({type(native_exc).__name__}): {native_exc}\n"
                     f"兜底解析也失败({type(fb_exc).__name__}): {fb_exc}"
                 ) from fb_exc
 
-    async def _parse_share_url_native(self, share_url: str) -> VideoInfo:
+        _cache_set(video_id, info)
+        return info
+
+    async def _resolve_video_id(self, share_url: str) -> str:
+        """从分享链接解析视频 ID；短链需一次请求，PC 链接为本地解析。失败返回空串。"""
+        host = urlparse(share_url).netloc
+        try:
+            if host in ["www.iesdouyin.com", "www.douyin.com"]:
+                return self._parse_video_id_from_path(share_url)
+            if host == "v.douyin.com":
+                return await self._parse_app_share_url(share_url)
+        except Exception:
+            pass
+        return ""
+
+    async def _parse_share_url_native(
+        self, share_url: str, video_id: str = ""
+    ) -> VideoInfo:
         # 解析URL获取域名
         parsed_url = urlparse(share_url)
         host = parsed_url.netloc
 
         if host in ["www.iesdouyin.com", "www.douyin.com"]:
             # 支持电脑网页端链接
-            video_id = self._parse_video_id_from_path(share_url)
+            if not video_id:
+                video_id = self._parse_video_id_from_path(share_url)
             if not video_id:
                 raise ValueError("Failed to parse video ID from PC share URL")
             share_url = self._get_request_url_by_video_id(video_id)
         elif host == "v.douyin.com":
             # 支持app分享链接 https://v.douyin.com/xxxxxx
-            video_id = await self._parse_app_share_url(share_url)
+            if not video_id:
+                video_id = await self._parse_app_share_url(share_url)
             if not video_id:
                 raise ValueError("Failed to parse video ID from app share URL")
             share_url = self._get_request_url_by_video_id(video_id)
@@ -189,19 +246,25 @@ class DouYin(BaseParser):
 
     async def parse_video_id(self, video_id: str) -> VideoInfo:
         """按视频 ID 解析；原生失败时自动启用风控兜底。"""
+        cached = _cache_get(video_id)
+        if cached is not None:
+            return cached
         try:
             req_url = self._get_request_url_by_video_id(video_id)
-            return await self.parse_share_url(req_url)
+            info = await self.parse_share_url(req_url)
         except Exception as native_exc:
             try:
                 from .douyin_fallback import parse_douyin_fallback
 
-                return await parse_douyin_fallback(video_id)
+                info = await parse_douyin_fallback(video_id)
             except Exception as fb_exc:
                 raise RuntimeError(
                     f"抖音原生解析失败({type(native_exc).__name__}): {native_exc}\n"
                     f"兜底解析也失败({type(fb_exc).__name__}): {fb_exc}"
                 ) from fb_exc
+
+        _cache_set(video_id, info)
+        return info
 
     def _get_request_url_by_video_id(self, video_id) -> str:
         return f"https://www.iesdouyin.com/share/video/{video_id}/"

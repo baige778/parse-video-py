@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -64,6 +65,10 @@ _COOKIE_RETRIES = _env_int("PARSE_VIDEO_PY_DOUYIN_COOKIE_RETRIES", 1)
 _BROWSER_GOTO_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_GOTO_TIMEOUT", 15000)
 _BROWSER_POLL_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_POLL_TIMEOUT", 10000)
 _BROWSER_CHANNEL = (os.environ.get("PARSE_VIDEO_PY_DOUYIN_BROWSER_CHANNEL") or "").strip()
+# 浏览器常驻复用：headless 模式复用单例，避免每请求冷启动；0 关闭。
+_BROWSER_REUSE = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_REUSE", 1)
+_BROWSER_REUSE_TTL = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_REUSE_TTL", 600)
+_BROWSER_REUSE_MAX = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_REUSE_MAX", 100)
 
 
 def _first_non_webp(url_list) -> str:
@@ -202,24 +207,163 @@ def _douyin_pure_http_item(video_id: str, cookies: dict) -> dict:
     return item
 
 
-def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
-    """用 Playwright 驱动 Edge/Chrome 打开抖音 PC 页，捕获详情接口数据。"""
-    from playwright.sync_api import sync_playwright
-
-    detail_url = f"https://www.douyin.com/video/{video_id}"
-    last_error = "无法启动任何可用浏览器"
-    # 容器内通常只有 Playwright 内置 Chromium（无系统 Edge/Chrome），
-    # 默认优先内置 Chromium，避免前两次必然失败的 channel 探测拖慢启动；
-    # 需要时可用 PARSE_VIDEO_PY_DOUYIN_BROWSER_CHANNEL 指定（如 msedge）。
+def _candidate_channels() -> list:
+    """浏览器 channel 探测顺序：内置 Chromium 优先，避免无效探测。"""
     channels: list = []
     if _BROWSER_CHANNEL:
         channels.append(_BROWSER_CHANNEL)
     channels.append(None)
     if not _BROWSER_CHANNEL:
         channels.extend(["msedge", "chrome"])
+    return channels
 
+
+# ---- 浏览器常驻复用状态（进程内单例，lazy 启动 + 定期回收） ----
+_browser_lock = threading.Lock()
+_pw = None
+_browser = None
+_context = None
+_browser_channel = None
+_browser_launched_at = 0.0
+_browser_use_count = 0
+
+
+def _release_reusable_browser() -> None:
+    """关闭常驻浏览器与 Playwright，重置状态。"""
+    global _pw, _browser, _context, _browser_channel
+    global _browser_launched_at, _browser_use_count
+    for obj in (_context, _browser):
+        if obj is not None:
+            try:
+                obj.close()
+            except Exception:
+                pass
+    if _pw is not None:
+        try:
+            _pw.stop()
+        except Exception:
+            pass
+        _log("browser", "常驻浏览器已回收")
+    _pw = _browser = _context = None
+    _browser_channel = None
+    _browser_launched_at = 0.0
+    _browser_use_count = 0
+
+
+def _get_reusable_context():
+    """懒加载常驻 Chromium context（headless），超生命周期/次数自动重建。
+
+    调用方需已持有 _browser_lock。
+    """
+    global _pw, _browser, _context, _browser_channel
+    global _browser_launched_at, _browser_use_count
+    from playwright.sync_api import sync_playwright
+
+    now = time.monotonic()
+    need_rebuild = (
+        _browser is None
+        or _context is None
+        or (now - _browser_launched_at) > _BROWSER_REUSE_TTL
+        or _browser_use_count >= _BROWSER_REUSE_MAX
+    )
+    if need_rebuild:
+        _release_reusable_browser()
+        last_error = "无法启动任何可用浏览器"
+        pw = sync_playwright().start()
+        launched = False
+        for channel in _candidate_channels():
+            try:
+                launch_kwargs = {
+                    "headless": True,
+                    "args": ["--disable-blink-features=AutomationControlled"],
+                }
+                if channel:
+                    launch_kwargs["channel"] = channel
+                browser = pw.chromium.launch(**launch_kwargs)
+            except Exception as exc:
+                last_error = f"启动 {channel or '内置Chromium'} 失败：{exc}"
+                continue
+            try:
+                context = browser.new_context(
+                    locale="zh-CN",
+                    viewport={"width": 1280, "height": 800},
+                )
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                continue
+            _pw = pw
+            _browser = browser
+            _context = context
+            _browser_channel = channel
+            _browser_launched_at = now
+            _browser_use_count = 0
+            launched = True
+            _log("browser", f"常驻浏览器已启动 channel={channel or '内置Chromium'}")
+            break
+        if not launched:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+            raise RuntimeError(last_error)
+    _browser_use_count += 1
+    return _context
+
+
+def _extract_from_context(context, detail_url: str) -> dict:
+    """在给定 context 上开新 page，捕获视频详情接口数据；返回 item 或抛异常。"""
+    page = context.new_page()
+    captured: dict = {}
+
+    def on_response(resp) -> None:
+        if "/aweme/v1/web/aweme/detail/" in resp.url and resp.status == 200:
+            try:
+                data = resp.json()
+            except Exception:
+                return
+            if isinstance(data, dict) and data.get("aweme_detail"):
+                captured["item"] = data["aweme_detail"]
+
+    try:
+        page.on("response", on_response)
+        page.goto(
+            detail_url,
+            wait_until="domcontentloaded",
+            timeout=_BROWSER_GOTO_TIMEOUT,
+        )
+        deadline = time.monotonic() + _BROWSER_POLL_TIMEOUT
+        while "item" not in captured and time.monotonic() < deadline:
+            page.wait_for_timeout(500)
+        if "item" in captured:
+            return captured["item"]
+        raise RuntimeError("页面已打开，但未捕获到视频详情接口（可能触发验证码）")
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
+    """用 Playwright 驱动 Edge/Chrome 打开抖音 PC 页，捕获详情接口数据。"""
+    from playwright.sync_api import sync_playwright
+
+    detail_url = f"https://www.douyin.com/video/{video_id}"
+
+    # 无头模式默认复用常驻浏览器，避免每请求冷启动（1~3s 开销）。
+    if headless and _BROWSER_REUSE:
+        with _browser_lock:
+            context = _get_reusable_context()
+            return _extract_from_context(context, detail_url)
+
+    # 有头模式（或禁用复用）：保持每次启动/关闭的独立浏览器。
+    last_error = "无法启动任何可用浏览器"
     with sync_playwright() as p:
-        for channel in channels:
+        for channel in _candidate_channels():
             try:
                 launch_kwargs = {
                     "headless": headless,
@@ -236,30 +380,7 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
                     locale="zh-CN",
                     viewport={"width": 1280, "height": 800},
                 )
-                page = context.new_page()
-                captured: dict = {}
-
-                def on_response(resp) -> None:
-                    if "/aweme/v1/web/aweme/detail/" in resp.url and resp.status == 200:
-                        try:
-                            data = resp.json()
-                        except Exception:
-                            return
-                        if isinstance(data, dict) and data.get("aweme_detail"):
-                            captured["item"] = data["aweme_detail"]
-
-                page.on("response", on_response)
-                page.goto(
-                    detail_url,
-                    wait_until="domcontentloaded",
-                    timeout=_BROWSER_GOTO_TIMEOUT,
-                )
-                deadline = time.monotonic() + _BROWSER_POLL_TIMEOUT
-                while "item" not in captured and time.monotonic() < deadline:
-                    page.wait_for_timeout(500)
-                if "item" in captured:
-                    return captured["item"]
-                last_error = "页面已打开，但未捕获到视频详情接口（可能触发验证码）"
+                return _extract_from_context(context, detail_url)
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
             finally:
