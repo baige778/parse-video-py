@@ -1,7 +1,5 @@
 import json
 import re
-import secrets
-import string
 from urllib.parse import parse_qs, urlparse
 
 from ..utils import create_async_client
@@ -56,35 +54,22 @@ class DouYin(BaseParser):
             response = await client.get(share_url, headers=self.get_default_headers())
             response.raise_for_status()
 
-        # 检查是否是图集内容
-        is_note = self._is_note_content(response.text, share_url)
+        # 直接解析分享页内的 window._ROUTER_DATA，同时覆盖视频与图集两种结构；
+        # 不再请求需要 a_bogus 真实签名的 slidesinfo 接口（假签名必然失败）。
+        pattern = re.compile(
+            pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
+            flags=re.DOTALL,
+        )
+        find_res = pattern.search(response.text)
 
-        json_data = None
-        if is_note:
-            # 如果是图集，使用专门的API获取数据
-            json_data = await self._get_slides_info(video_id)
+        if not find_res or not find_res.group(1):
+            raise ValueError("parse video json info from html fail")
 
-        if not json_data:
-            # 如果专用API失败或者不是图集，使用标准解析方式
-            pattern = re.compile(
-                pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
-                flags=re.DOTALL,
-            )
-            find_res = pattern.search(response.text)
+        json_data = json.loads(find_res.group(1).strip())
 
-            if not find_res or not find_res.group(1):
-                raise ValueError("parse video json info from html fail")
-
-            json_data = json.loads(find_res.group(1).strip())
-
-        # 处理不同的数据结构
+        # 处理 HTML 解析返回的 loaderData 数据结构
         data = None
-        if isinstance(json_data, dict) and "aweme_details" in json_data:
-            # 专用API返回的数据结构
-            if len(json_data["aweme_details"]) > 0:
-                data = json_data["aweme_details"][0]
-        elif isinstance(json_data, dict) and "loaderData" in json_data:
-            # 标准HTML解析返回的数据结构
+        if isinstance(json_data, dict) and "loaderData" in json_data:
             VIDEO_ID_PAGE_KEY = "video_(id)/page"
             NOTE_ID_PAGE_KEY = "note_(id)/page"
 
@@ -277,67 +262,3 @@ class DouYin(BaseParser):
 
         # 如果没找到，使用第一项
         return url_list[0] if url_list and url_list[0] else ""
-
-    def _is_note_content(self, html_content: str, share_url: str) -> bool:
-        """检查是否是图集内容"""
-        try:
-            # 方法1: 检查canonical URL是否包含/note/
-            pattern = re.compile(
-                r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^' r'"\']+)["\']',
-                re.IGNORECASE,
-            )
-            match = pattern.search(html_content)
-            if match:
-                canonical_url = match.group(1)
-                if "/note/" in canonical_url:
-                    return True
-
-            # 方法2: 检查URL路径是否包含note相关路径
-            parsed_url = urlparse(share_url)
-            if "/note/" in parsed_url.path:
-                return True
-
-            # 方法3: 检查HTML中是否有图集相关的标识
-            if "note_" in html_content or "图文" in html_content:
-                return True
-
-        except Exception:
-            pass
-
-        return False
-
-    async def _get_slides_info(self, video_id: str) -> dict:
-        """获取图集的详细信息，包括Live Photo"""
-        try:
-            # 生成web_id和a_bogus参数
-            web_id = "75" + self._generate_fixed_length_numeric_id(15)
-            a_bogus = self._rand_seq(64)
-
-            api_url = (
-                f"https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/"
-                f"?reflow_source=reflow_page"
-                f"&web_id={web_id}"
-                f"&device_id={web_id}"
-                f"&aweme_ids=%5B{video_id}%5D"
-                f"&request_source=200"
-                f"&a_bogus={a_bogus}"
-            )
-
-            async with create_async_client() as client:
-                response = await client.get(api_url, headers=self.get_default_headers())
-                response.raise_for_status()
-
-            data = response.json()
-            return data if data.get("aweme_details") else None
-
-        except Exception:
-            return None
-
-    def _generate_fixed_length_numeric_id(self, length: int) -> str:
-        """生成固定位数的随机数字ID"""
-        return "".join(secrets.choice(string.digits) for _ in range(length))
-
-    def _rand_seq(self, n: int) -> str:
-        """生成随机字符串"""
-        chars = string.ascii_letters + string.digits
-        return "".join(secrets.choice(chars) for _ in range(n))

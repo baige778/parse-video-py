@@ -45,6 +45,27 @@ _EDGE_UA = (
 )
 
 
+def _env_int(name: str, default: int) -> int:
+    """从环境变量读取整数配置，解析失败时回退默认值。"""
+    try:
+        return int((os.environ.get(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _log(tag: str, msg: str) -> None:
+    """抖音解析结构化日志（stderr），带路径标记与耗时，便于排查。"""
+    print(f"[parse-video-py][douyin][{tag}] {msg}", file=sys.stderr, flush=True)
+
+
+# ---- 抖音解析可配置项（环境变量；默认值针对容器/常见场景） ----
+_COOKIE_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_COOKIE_TIMEOUT", 5)
+_COOKIE_RETRIES = _env_int("PARSE_VIDEO_PY_DOUYIN_COOKIE_RETRIES", 1)
+_BROWSER_GOTO_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_GOTO_TIMEOUT", 15000)
+_BROWSER_POLL_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_BROWSER_POLL_TIMEOUT", 10000)
+_BROWSER_CHANNEL = (os.environ.get("PARSE_VIDEO_PY_DOUYIN_BROWSER_CHANNEL") or "").strip()
+
+
 def _first_non_webp(url_list) -> str:
     for url in url_list or []:
         if url and not str(url).endswith(".webp"):
@@ -162,12 +183,12 @@ def _douyin_pure_http_item(video_id: str, cookies: dict) -> dict:
             headers=headers,
             cookies=cookies,
             impersonate="chrome",
-            timeout=25,
+            timeout=_COOKIE_TIMEOUT,
         )
     except Exception:
         # curl_cffi 不可用或 TLS 被重置时退回 httpx；
         # httpx 会读取 HTTP_PROXY/HTTPS_PROXY，适合容器内走代理的场景。
-        with httpx.Client(timeout=25) as client:
+        with httpx.Client(timeout=_COOKIE_TIMEOUT) as client:
             resp = client.get(base, params=params, headers=headers, cookies=cookies)
     if resp.status_code != 200:
         raise RuntimeError(f"抖音接口返回 HTTP {resp.status_code}: {resp.text[:100]}")
@@ -187,20 +208,26 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
 
     detail_url = f"https://www.douyin.com/video/{video_id}"
     last_error = "无法启动任何可用浏览器"
+    # 容器内通常只有 Playwright 内置 Chromium（无系统 Edge/Chrome），
+    # 默认优先内置 Chromium，避免前两次必然失败的 channel 探测拖慢启动；
+    # 需要时可用 PARSE_VIDEO_PY_DOUYIN_BROWSER_CHANNEL 指定（如 msedge）。
+    channels: list = []
+    if _BROWSER_CHANNEL:
+        channels.append(_BROWSER_CHANNEL)
+    channels.append(None)
+    if not _BROWSER_CHANNEL:
+        channels.extend(["msedge", "chrome"])
+
     with sync_playwright() as p:
-        for channel in ("msedge", "chrome", None):
+        for channel in channels:
             try:
+                launch_kwargs = {
+                    "headless": headless,
+                    "args": ["--disable-blink-features=AutomationControlled"],
+                }
                 if channel:
-                    browser = p.chromium.launch(
-                        channel=channel,
-                        headless=headless,
-                        args=["--disable-blink-features=AutomationControlled"],
-                    )
-                else:
-                    browser = p.chromium.launch(
-                        headless=headless,
-                        args=["--disable-blink-features=AutomationControlled"],
-                    )
+                    launch_kwargs["channel"] = channel
+                browser = p.chromium.launch(**launch_kwargs)
             except Exception as exc:
                 last_error = f"启动 {channel or '内置Chromium'} 失败：{exc}"
                 continue
@@ -222,8 +249,12 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
                             captured["item"] = data["aweme_detail"]
 
                 page.on("response", on_response)
-                page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-                deadline = time.monotonic() + 25
+                page.goto(
+                    detail_url,
+                    wait_until="domcontentloaded",
+                    timeout=_BROWSER_GOTO_TIMEOUT,
+                )
+                deadline = time.monotonic() + _BROWSER_POLL_TIMEOUT
                 while "item" not in captured and time.monotonic() < deadline:
                     page.wait_for_timeout(500)
                 if "item" in captured:
@@ -241,12 +272,32 @@ def _douyin_browser_extract(video_id: str, headless: bool) -> dict:
 
 def _extract_item_with_retry(video_id: str, headed: bool = False) -> dict:
     """优先无头模式，失败后使用有头模式（会短暂弹出浏览器窗口）。"""
+    started = time.monotonic()
     if headed:
-        return _douyin_browser_extract(video_id, headless=False)
+        item = _douyin_browser_extract(video_id, headless=False)
+        _log(
+            "browser",
+            f"成功(有头) video_id={video_id} 耗时={time.monotonic() - started:.2f}s",
+        )
+        return item
     try:
-        return _douyin_browser_extract(video_id, headless=True)
-    except Exception:
-        return _douyin_browser_extract(video_id, headless=False)
+        item = _douyin_browser_extract(video_id, headless=True)
+        _log(
+            "browser",
+            f"成功(无头) video_id={video_id} 耗时={time.monotonic() - started:.2f}s",
+        )
+        return item
+    except Exception as headless_exc:
+        _log(
+            "browser",
+            f"无头失败 耗时={time.monotonic() - started:.2f}s: {headless_exc}；转有头重试",
+        )
+        item = _douyin_browser_extract(video_id, headless=False)
+        _log(
+            "browser",
+            f"成功(有头重试) video_id={video_id} 耗时={time.monotonic() - started:.2f}s",
+        )
+        return item
 
 
 def _item_to_videoinfo(item: dict) -> VideoInfo:
@@ -350,14 +401,32 @@ async def parse_douyin_fallback(
     cookies = None if force_browser else load_douyin_cookies(cookies_path)
 
     if cookies:
-        try:
-            item = await asyncio.to_thread(_douyin_pure_http_item, video_id, cookies)
-            info = _item_to_videoinfo(item)
-            if info.video_url:
-                info.video_url = await _resolve_video_redirect_url(info.video_url)
-            return info
-        except Exception as exc:
-            print(f"[parse-video-py] 抖音 Cookie 直连失败：{exc}", file=sys.stderr)
+        retries = _COOKIE_RETRIES if _COOKIE_RETRIES >= 0 else 0
+        attempt = 0
+        while True:
+            attempt += 1
+            started = time.monotonic()
+            try:
+                item = await asyncio.to_thread(_douyin_pure_http_item, video_id, cookies)
+                info = _item_to_videoinfo(item)
+                if info.video_url:
+                    info.video_url = await _resolve_video_redirect_url(info.video_url)
+                _log(
+                    "cookie",
+                    f"成功 video_id={video_id} "
+                    f"耗时={time.monotonic() - started:.2f}s",
+                )
+                return info
+            except Exception as exc:
+                _log(
+                    "cookie",
+                    f"抖音 Cookie 直连失败 第{attempt}次 "
+                    f"耗时={time.monotonic() - started:.2f}s: {exc}",
+                )
+                if attempt <= retries:
+                    await asyncio.sleep(3 * attempt)
+                    continue
+                break
 
     if not allow_browser:
         raise RuntimeError(
