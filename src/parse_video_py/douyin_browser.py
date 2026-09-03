@@ -257,8 +257,27 @@ async def with_context(fn: Callable):
 
 async def _extract_from_context(context, detail_url: str) -> dict:
     """在给定 context 上开新 page，捕获视频详情接口数据；返回 item 或抛异常。"""
-    page = await context.new_page()
     captured: dict = {}
+
+    # 预热：先访问首页，让 sec_sdk 完成初始化并刷新 ttwid/msToken 等风控 Cookie；
+    # 否则直接打开视频页时 detail 接口会被风控静默拦截（HTTP 200 + 空 body）。
+    warmup_page = await context.new_page()
+    try:
+        await warmup_page.goto(
+            "https://www.douyin.com/",
+            wait_until="domcontentloaded",
+            timeout=_GOTO_TIMEOUT,
+        )
+        await warmup_page.wait_for_timeout(4000)
+    except Exception:
+        pass
+    finally:
+        try:
+            await warmup_page.close()
+        except Exception:
+            pass
+
+    page = await context.new_page()
 
     async def on_response(resp) -> None:
         if "/aweme/v1/web/aweme/detail/" in resp.url and resp.status == 200:
@@ -355,39 +374,60 @@ async def get_cookies() -> Optional[list]:
 
 
 async def is_logged_in() -> bool:
-    """判断常驻浏览器 profile 当前是否已登录抖音（服务端实际校验）。
+    """判断常驻浏览器 profile 当前是否已登录抖音（首页 DOM 判定）。
 
-    仅检查 cookie 名是否存在的旧实现会误判：sessionid cookie 存在但其值
-    已在服务端失效时（抖音返回 status_code=8），仍会错误返回「已登录」。
-    这里通过请求 user/profile/self 接口，用 status_code 判定真实登录态：
-      status_code == 0 -> 已登录；其余（含 8 未登录、风控）-> 未登录。
+    profile/self 接口在无头 + 风控环境下并不可靠：即使实际已登录，接口也可能
+    返回 status_code=8「用户未登录」，造成「已登录被误判为未登录」。故改为直接
+    校验首页 DOM 的登录区：
+      已登录 -> 页面右上角出现「退出登录」菜单项（未登录时不会渲染）；
+      未登录 -> 页面右上角存在可见的「登录」入口。
+    最后回退到 sessionid cookie 是否存在。
     """
     async def _check(ctx):
         page = await ctx.new_page()
         try:
-            result: dict = {}
-
-            async def on_response(resp) -> None:
-                if "/aweme/v1/web/user/profile/self/" in resp.url and resp.status == 200:
-                    try:
-                        data = await resp.json()
-                    except Exception:
-                        return
-                    result["status_code"] = data.get("status_code")
-
-            page.on("response", on_response)
+            # 预热首页，等待右上角登录区完成渲染
             try:
                 await page.goto(
-                    "https://www.douyin.com/aweme/v1/web/user/profile/self/",
+                    "https://www.douyin.com/",
                     wait_until="domcontentloaded",
-                    timeout=15000,
+                    timeout=_GOTO_TIMEOUT,
+                )
+                await page.wait_for_timeout(4000)
+            except Exception:
+                pass
+
+            # 已登录：DOM 文本里出现「退出登录」（用 textContent 而非 innerText，
+            # 因为该菜单项默认处于折叠状态，innerText 读不到）。
+            try:
+                text = await page.evaluate(
+                    "() => document.body ? document.body.textContent : ''"
                 )
             except Exception:
-                return False
-            deadline = time.monotonic() + 8
-            while "status_code" not in result and time.monotonic() < deadline:
-                await page.wait_for_timeout(500)
-            return result.get("status_code") == 0
+                text = ""
+            if text and "退出登录" in text:
+                return True
+
+            # 未登录：右上角存在可见的「登录」入口。
+            for sel in (
+                "button:has-text('登录')",
+                "a:has-text('登录')",
+                "span:has-text('登录')",
+            ):
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible(timeout=1000):
+                        return False
+                except Exception:
+                    continue
+
+            # 兜底：存在 sessionid 即视为已登录。
+            try:
+                cookies = await ctx.cookies()
+            except Exception:
+                cookies = []
+            names = {c.get("name") for c in cookies if isinstance(c, dict)}
+            return bool(set(_LOGIN_COOKIE_KEYS) & names)
         except Exception:
             return False
         finally:
