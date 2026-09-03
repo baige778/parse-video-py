@@ -39,6 +39,26 @@ _WIN_UA = (
 # 登录态判定 Cookie
 _LOGIN_COOKIE_KEYS = ("sessionid", "sessionid_ss")
 
+# 反自动化检测补丁：抖音登录/解析页会加载 uc-secure-tool-detect 无感验证脚本，
+# 无头浏览器若不伪装（navigator.platform 暴露 Linux 与 Windows UA 矛盾、
+# navigator.webdriver 为 true 等），风控会拦截 get_qrcode 等接口，导致二维码不生成。
+_STEALTH_SCRIPT = """
+(() => {
+  const spoof = (prop, getter) => {
+    try { Object.defineProperty(navigator, prop, { get: getter }); } catch (e) {}
+  };
+  spoof('webdriver', () => undefined);
+  spoof('platform', () => 'Win32');
+  spoof('languages', () => ['zh-CN', 'zh', 'en-US', 'en']);
+  spoof('plugins', () => [1, 2, 3, 4, 5]);
+  spoof('hardwareConcurrency', () => 8);
+  spoof('deviceMemory', () => 8);
+  try {
+    window.chrome = window.chrome || { runtime: {}, loadTimes: function () {}, csi: function () {}, app: {} };
+  } catch (e) {}
+})();
+"""
+
 
 def _env_int(name: str, default: int) -> int:
     """从环境变量读取整数配置，解析失败时回退默认值。"""
@@ -197,6 +217,7 @@ async def _get_context_locked():
                     user_agent=_WIN_UA,
                     **launch_kwargs,
                 )
+                await ctx.add_init_script(_STEALTH_SCRIPT)
             except Exception as exc:
                 last_error = f"启动 {channel or '内置Chromium'} 失败：{exc}"
                 continue
@@ -239,10 +260,10 @@ async def _extract_from_context(context, detail_url: str) -> dict:
     page = await context.new_page()
     captured: dict = {}
 
-    def on_response(resp) -> None:
+    async def on_response(resp) -> None:
         if "/aweme/v1/web/aweme/detail/" in resp.url and resp.status == 200:
             try:
-                data = resp.json()
+                data = await resp.json()
             except Exception:
                 return
             if isinstance(data, dict) and data.get("aweme_detail"):
@@ -334,12 +355,51 @@ async def get_cookies() -> Optional[list]:
 
 
 async def is_logged_in() -> bool:
-    """判断常驻浏览器 profile 当前是否已登录抖音。"""
-    cookies = await get_cookies()
-    if not cookies:
+    """判断常驻浏览器 profile 当前是否已登录抖音（服务端实际校验）。
+
+    仅检查 cookie 名是否存在的旧实现会误判：sessionid cookie 存在但其值
+    已在服务端失效时（抖音返回 status_code=8），仍会错误返回「已登录」。
+    这里通过请求 user/profile/self 接口，用 status_code 判定真实登录态：
+      status_code == 0 -> 已登录；其余（含 8 未登录、风控）-> 未登录。
+    """
+    async def _check(ctx):
+        page = await ctx.new_page()
+        try:
+            result: dict = {}
+
+            async def on_response(resp) -> None:
+                if "/aweme/v1/web/user/profile/self/" in resp.url and resp.status == 200:
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        return
+                    result["status_code"] = data.get("status_code")
+
+            page.on("response", on_response)
+            try:
+                await page.goto(
+                    "https://www.douyin.com/aweme/v1/web/user/profile/self/",
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+            except Exception:
+                return False
+            deadline = time.monotonic() + 8
+            while "status_code" not in result and time.monotonic() < deadline:
+                await page.wait_for_timeout(500)
+            return result.get("status_code") == 0
+        except Exception:
+            return False
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    try:
+        return await with_context(_check)
+    except Exception:
         return False
-    names = {c.get("name") for c in cookies if isinstance(c, dict)}
-    return any(k in names for k in _LOGIN_COOKIE_KEYS)
 
 
 async def recycle() -> None:

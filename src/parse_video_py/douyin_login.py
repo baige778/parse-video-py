@@ -52,9 +52,20 @@ _LOGIN_TRIGGER_SELECTORS = (
     "span:has-text('登录')",
 )
 
+# 「扫码登录」tab 的候选选择器：抖音登录弹窗默认激活「验证码登录」tab，
+# 二维码此时不渲染；需显式点击「扫码登录」tab 才会出现二维码 img。
+_QR_TAB_SELECTORS = (
+    "span:has-text('扫码登录')",
+    "div:has-text('扫码登录')",
+    "div[role='tab']:has-text('扫码登录')",
+    "button:has-text('扫码登录')",
+    "span:has-text('扫一扫')",
+)
+
 # 二维码元素候选选择器（按优先级，宽高需 >= _QR_MIN_SIZE 才算命中）
 _QR_SELECTORS = (
-    "div[class*='login'] img",  # 抖音登录弹窗二维码（优先）
+    "img[src^='data:image']",  # 首页弹窗：二维码是 base64 data URI 的 img（178x178）
+    "div[class*='login'] img",  # 旧结构兜底
     "img[src*='qrcode']",
     "img[src*='qr_code']",
     "img[src*='qr-code']",
@@ -103,6 +114,19 @@ class DouyinLoginManager:
         async with self._lock:
             if self._state == "pending":
                 return self._pending_payload("登录已在进行中")
+
+            # 已登录则无需再次扫码：直接返回「已登录」。
+            # is_logged_in() 是服务端实际校验，旧 cookie 失效会被正确判定为未登录。
+            try:
+                if await douyin_browser.is_logged_in():
+                    self._state = "idle"
+                    return {
+                        "code": 200,
+                        "msg": "已登录",
+                        "data": {"status": "already_logged_in", "logged_in": True},
+                    }
+            except Exception:
+                pass
 
             await self._reset_locked()
             self._state = "failed"
@@ -194,8 +218,10 @@ class DouyinLoginManager:
         return {"code": 200, "msg": msg, "data": data}
 
     async def _open_login_qr(self, page) -> None:
+        # 采用首页 + 点击「登录」按钮触发二维码。抖音前端会为登录按钮自动附加
+        # 正确的 a_bogus/msToken 签名参数；直接访问 passport/login 页反而会因缺参数
+        # 被风控返回 error_code=22「非法应用」，故不作为首选。
         await page.goto(_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
-        # 抖音首页可能自动弹出登录框，等待渲染
         await page.wait_for_timeout(2500)
 
         # 若二维码已直接出现，直接返回
@@ -214,8 +240,20 @@ class DouyinLoginManager:
             except Exception:
                 continue
 
-        # 等待二维码出现（最多 10s）
-        deadline = time.monotonic() + 10
+        # 登录弹窗默认激活「验证码登录」tab，二维码此时不渲染；先切到「扫码登录」tab。
+        for selector in _QR_TAB_SELECTORS:
+            try:
+                loc = page.locator(selector).first
+                if await loc.count() == 0:
+                    continue
+                if await loc.is_visible(timeout=1500):
+                    await loc.click(timeout=3000)
+                    break
+            except Exception:
+                continue
+
+        # 等待二维码出现（最多 15s，首页登录弹窗偶有延迟）
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if await self._locate_qr_element(page) is not None:
                 return
