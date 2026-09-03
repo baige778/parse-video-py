@@ -1,10 +1,9 @@
 import base64
 from typing import Dict, List
 
-import fake_useragent
 from parsel import Selector
 
-from ..utils import create_async_client
+from ..utils import create_async_client, random_user_agent
 from .base import BaseParser, VideoAuthor, VideoInfo
 
 
@@ -16,7 +15,7 @@ class MeiPai(BaseParser):
     async def parse_share_url(self, share_url: str) -> VideoInfo:
         async with create_async_client() as client:
             headers = {
-                "User-Agent": fake_useragent.UserAgent(os=["windows"]).random,
+                "User-Agent": random_user_agent("windows"),
             }
             response = await client.get(share_url, headers=headers)
             response.raise_for_status()

@@ -1,6 +1,5 @@
-import fake_useragent
 
-from ..utils import create_async_client, get_val_from_url_by_query_key
+from ..utils import create_async_client, get_val_from_url_by_query_key, random_user_agent
 from .base import BaseParser, VideoAuthor, VideoInfo
 
 
@@ -28,7 +27,7 @@ class SixRoom(BaseParser):
         )
         headers = {
             "Referer": f"https://m.6.cn/v/{video_id}",
-            "User-Agent": fake_useragent.UserAgent(os="iOS").random,
+            "User-Agent": random_user_agent("iOS"),
         }
         async with create_async_client(follow_redirects=True) as client:
             response = await client.get(req_url, headers=headers)

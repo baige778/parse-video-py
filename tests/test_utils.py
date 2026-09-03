@@ -1,17 +1,35 @@
 import os
 from unittest.mock import patch
 
-from parse_video_py.utils import create_async_client, extract_url
+from parse_video_py.utils import (
+    _SharedClientSession,
+    create_async_client,
+    create_dedicated_async_client,
+    extract_url,
+)
 
 
 class TestCreateAsyncClient:
-    """测试代理客户端工厂函数"""
+    """测试共享会话工厂：create_async_client 复用全局连接池"""
+
+    def test_returns_reusable_session(self):
+        """create_async_client 返回轻量会话，而非独立的 httpx.AsyncClient"""
+        assert isinstance(create_async_client(), _SharedClientSession)
+
+    def test_session_keeps_defaults(self):
+        """会话级参数（follow_redirects 等）被保留为请求默认值"""
+        session = create_async_client(follow_redirects=False)
+        assert session._defaults == {"follow_redirects": False}
+
+
+class TestDedicatedAsyncClient:
+    """测试独立客户端工厂（下载代理等需显式 close 的场景）"""
 
     def test_no_proxy_env(self):
         """未设置代理环境变量时，httpx.AsyncClient 不传 proxy 参数"""
         with patch.dict(os.environ, {}, clear=True):
             with patch("parse_video_py.utils.httpx.AsyncClient") as mock:
-                create_async_client()
+                create_dedicated_async_client()
                 mock.assert_called_once_with()
 
     def test_with_proxy_env(self):
@@ -19,7 +37,7 @@ class TestCreateAsyncClient:
         proxy_url = "http://user:pass@proxy.example.com:8080"
         with patch.dict(os.environ, {"PARSE_VIDEO_PROXY": proxy_url}):
             with patch("parse_video_py.utils.httpx.AsyncClient") as mock:
-                create_async_client()
+                create_dedicated_async_client()
                 mock.assert_called_once_with(proxy=proxy_url)
 
     def test_proxy_with_follow_redirects(self):
@@ -27,14 +45,14 @@ class TestCreateAsyncClient:
         proxy_url = "http://proxy.example.com:8080"
         with patch.dict(os.environ, {"PARSE_VIDEO_PROXY": proxy_url}):
             with patch("parse_video_py.utils.httpx.AsyncClient") as mock:
-                create_async_client(follow_redirects=True)
+                create_dedicated_async_client(follow_redirects=True)
                 mock.assert_called_once_with(proxy=proxy_url, follow_redirects=True)
 
     def test_existing_kwargs_preserved(self):
         """未设代理时，透传的 kwargs 不变"""
         with patch.dict(os.environ, {}, clear=True):
             with patch("parse_video_py.utils.httpx.AsyncClient") as mock:
-                create_async_client(follow_redirects=False)
+                create_dedicated_async_client(follow_redirects=False)
                 mock.assert_called_once_with(follow_redirects=False)
 
 

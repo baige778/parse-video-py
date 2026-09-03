@@ -97,7 +97,7 @@ async def resolve_douyin_video_id(share_url: str) -> str:
     """把 v.douyin.com 短链解析成视频 ID。"""
     async with httpx.AsyncClient(
         follow_redirects=True,
-        timeout=20,
+        timeout=5,
         headers={"User-Agent": _DOUYIN_MOBILE_UA},
     ) as client:
         response = await client.get(share_url)
@@ -117,7 +117,7 @@ async def _resolve_video_redirect_url(video_url: str) -> str:
     try:
         async with httpx.AsyncClient(
             follow_redirects=False,
-            timeout=15,
+            timeout=5,
             headers={"User-Agent": _DOUYIN_MOBILE_UA},
         ) as client:
             response = await client.get(video_url)

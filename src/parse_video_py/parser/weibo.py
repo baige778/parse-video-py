@@ -1,9 +1,8 @@
 import re
 from urllib.parse import urlparse
 
-import fake_useragent
 
-from ..utils import create_async_client, get_val_from_url_by_query_key
+from ..utils import create_async_client, get_val_from_url_by_query_key, random_user_agent
 from .base import BaseParser, ImgInfo, VideoAuthor, VideoInfo
 
 
@@ -37,7 +36,7 @@ class WeiBo(BaseParser):
         headers = {
             "Referer": f"https://h5.video.weibo.com/show/{video_id}",
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": fake_useragent.UserAgent(os="iOS").random,
+            "User-Agent": random_user_agent("iOS"),
         }
         post_content = 'data={"Component_Play_Playinfo":{"oid":"' + video_id + '"}}'
         async with create_async_client(follow_redirects=True) as client:
@@ -72,7 +71,7 @@ class WeiBo(BaseParser):
         # Try mobile API first
         req_url = f"https://m.weibo.cn/statuses/show?id={post_id}"
         headers = {
-            "User-Agent": fake_useragent.UserAgent(os="iOS").random,
+            "User-Agent": random_user_agent("iOS"),
             "Referer": "https://m.weibo.cn/",
             "Content-Type": "application/json;charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
@@ -91,7 +90,7 @@ class WeiBo(BaseParser):
 
         # Fallback to desktop page parsing using the original URL
         headers = {
-            "User-Agent": fake_useragent.UserAgent(os="iOS").random,
+            "User-Agent": random_user_agent("iOS"),
         }
 
         async with create_async_client(follow_redirects=True) as client:

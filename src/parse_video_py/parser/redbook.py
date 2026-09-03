@@ -1,9 +1,8 @@
 import re
 
-import fake_useragent
 import yaml
 
-from ..utils import create_async_client
+from ..utils import create_async_client, random_user_agent
 from .base import BaseParser, ImgInfo, VideoAuthor, VideoInfo
 
 
@@ -14,7 +13,7 @@ class RedBook(BaseParser):
 
     async def parse_share_url(self, share_url: str) -> VideoInfo:
         headers = {
-            "User-Agent": fake_useragent.UserAgent(os=["windows"]).random,
+            "User-Agent": random_user_agent("windows"),
         }
         async with create_async_client(follow_redirects=True) as client:
             response = await client.get(share_url, headers=headers)

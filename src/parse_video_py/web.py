@@ -15,7 +15,11 @@ from fastapi_mcp import FastApiMCP
 
 from parse_video_py import VideoSource, douyin_browser, parse_video_id, parse_video_share_url
 from parse_video_py.douyin_login import get_douyin_login_manager
-from parse_video_py.utils import create_async_client, extract_url
+from parse_video_py.utils import (
+    close_shared_client,
+    create_dedicated_async_client,
+    extract_url,
+)
 
 
 def _get_templates_dir() -> str:
@@ -31,6 +35,8 @@ async def lifespan(_: FastAPI):
     yield
     # 应用退出时关闭抖音登录浏览器，释放内存
     await get_douyin_login_manager().shutdown()
+    # 关闭全局共享 HTTP 客户端连接池
+    await close_shared_client()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -184,7 +190,7 @@ async def download_proxy(url: str):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "禁止下载该地址")
 
     headers = _build_download_headers(url)
-    client = create_async_client(
+    client = create_dedicated_async_client(
         timeout=httpx.Timeout(60.0, connect=15.0),
         follow_redirects=True,
     )

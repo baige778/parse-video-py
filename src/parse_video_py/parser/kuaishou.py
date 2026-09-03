@@ -1,9 +1,8 @@
 import json
 import re
 
-import fake_useragent
 
-from ..utils import create_async_client
+from ..utils import create_async_client, random_user_agent
 from .base import BaseParser, ImgInfo, VideoAuthor, VideoInfo
 
 
@@ -13,7 +12,7 @@ class KuaiShou(BaseParser):
     """
 
     async def parse_share_url(self, share_url: str) -> VideoInfo:
-        user_agent = fake_useragent.UserAgent(os="iOS").random
+        user_agent = random_user_agent("iOS")
 
         # 获取跳转前的信息, 从中获取跳转url, cookie
         async with create_async_client(follow_redirects=False) as client:

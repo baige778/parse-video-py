@@ -1,9 +1,8 @@
 import time
 from urllib.parse import urlparse
 
-import fake_useragent
 
-from ..utils import create_async_client
+from ..utils import create_async_client, random_user_agent
 from .base import BaseParser, VideoInfo
 
 
@@ -30,7 +29,7 @@ class LiShiPin(BaseParser):
         async with create_async_client() as client:
             headers = {
                 "Referer": f"https://www.pearvideo.com/detail_{video_id}",
-                "User-Agent": fake_useragent.UserAgent(os=["windows"]).random,
+                "User-Agent": random_user_agent("windows"),
             }
             response = await client.get(req_url, headers=headers)
 

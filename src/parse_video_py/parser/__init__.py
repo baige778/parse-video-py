@@ -1,3 +1,6 @@
+import os
+import time
+
 from .acfun import AcFun
 from .base import VideoInfo, VideoSource
 from .bilibili import BiliBili
@@ -146,12 +149,42 @@ video_source_info_mapping = {
 }
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int((os.environ.get(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+# 全平台解析结果缓存（进程内，TTL 过期自动失效；降低重复解析耗时）
+_CACHE_TTL = _env_int("PARSE_VIDEO_PY_CACHE_TTL", 300)
+_info_cache: dict = {}
+
+
+def _cache_get(key: str):
+    if not key or _CACHE_TTL <= 0:
+        return None
+    item = _info_cache.get(key)
+    if item and time.monotonic() - item[0] < _CACHE_TTL:
+        return item[1]
+    return None
+
+
+def _cache_set(key: str, info: VideoInfo) -> None:
+    if key and _CACHE_TTL > 0:
+        _info_cache[key] = (time.monotonic(), info)
+
+
 async def parse_video_share_url(share_url: str) -> VideoInfo:
     """
     解析分享链接, 获取视频信息
     :param share_url: 视频分享链接
     :return:
     """
+    cached = _cache_get(share_url)
+    if cached is not None:
+        return cached
+
     source = ""
     for item_source, item_source_info in video_source_info_mapping.items():
         for item_url_domain in item_source_info["domain_list"]:
@@ -171,6 +204,7 @@ async def parse_video_share_url(share_url: str) -> VideoInfo:
     _obj = url_parser()
     video_info = await _obj.parse_share_url(share_url)
 
+    _cache_set(share_url, video_info)
     return video_info
 
 
@@ -184,6 +218,11 @@ async def parse_video_id(source: VideoSource, video_id: str) -> VideoInfo:
     if not video_id or not source:
         raise ValueError("video_id or source is empty")
 
+    cache_key = f"{source.value}:{video_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     id_parser = video_source_info_mapping[source]["parser"]
     if not id_parser:
         raise ValueError(f"source {source} has no video parser")
@@ -191,4 +230,5 @@ async def parse_video_id(source: VideoSource, video_id: str) -> VideoInfo:
     _obj = id_parser()
     video_info = await _obj.parse_video_id(video_id)
 
+    _cache_set(cache_key, video_info)
     return video_info

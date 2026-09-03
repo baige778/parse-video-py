@@ -21,6 +21,15 @@ def _env_int(name: str, default: int) -> int:
 _CACHE_TTL = _env_int("PARSE_VIDEO_PY_DOUYIN_CACHE_TTL", 300)
 _video_cache: Dict[str, Tuple[float, VideoInfo]] = {}
 
+# 原生路径请求超时（秒）：快速失败，让浏览器兜底尽快接管，避免默认超时白等
+_NATIVE_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_NATIVE_TIMEOUT", 3)
+# 短链解析 / 视频重定向请求超时（秒）
+_REDIRECT_TIMEOUT = _env_int("PARSE_VIDEO_PY_DOUYIN_REDIRECT_TIMEOUT", 5)
+
+_ROUTER_DATA_PATTERN = re.compile(
+    r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", re.DOTALL
+)
+
 
 def _cache_get(video_id: str):
     if not video_id or _CACHE_TTL <= 0:
@@ -108,16 +117,16 @@ class DouYin(BaseParser):
             raise ValueError(f"Douyin not support this host: {host}")
 
         async with create_async_client(follow_redirects=True) as client:
-            response = await client.get(share_url, headers=self.get_default_headers())
+            response = await client.get(
+                share_url,
+                headers=self.get_default_headers(),
+                timeout=_NATIVE_TIMEOUT,
+            )
             response.raise_for_status()
 
         # 直接解析分享页内的 window._ROUTER_DATA，同时覆盖视频与图集两种结构；
         # 不再请求需要 a_bogus 真实签名的 slidesinfo 接口（假签名必然失败）。
-        pattern = re.compile(
-            pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
-            flags=re.DOTALL,
-        )
-        find_res = pattern.search(response.text)
+        find_res = _ROUTER_DATA_PATTERN.search(response.text)
 
         if not find_res or not find_res.group(1):
             raise ValueError("parse video json info from html fail")
@@ -240,7 +249,11 @@ class DouYin(BaseParser):
 
     async def get_video_redirect_url(self, video_url: str) -> str:
         async with create_async_client(follow_redirects=False) as client:
-            response = await client.get(video_url, headers=self.get_default_headers())
+            response = await client.get(
+                video_url,
+                headers=self.get_default_headers(),
+                timeout=_REDIRECT_TIMEOUT,
+            )
         # 返回重定向后的地址，如果没有重定向则返回原地址(抖音中的西瓜视频,重定向地址为空)
         return response.headers.get("location") or video_url
 
@@ -272,7 +285,11 @@ class DouYin(BaseParser):
     async def _parse_app_share_url(self, share_url: str) -> str:
         """解析app分享链接 https://v.douyin.com/xxxxxx"""
         async with create_async_client(follow_redirects=False) as client:
-            response = await client.get(share_url, headers=self.get_default_headers())
+            response = await client.get(
+                share_url,
+                headers=self.get_default_headers(),
+                timeout=_REDIRECT_TIMEOUT,
+            )
 
         location = response.headers.get("location")
         if not location:
