@@ -32,8 +32,17 @@ from . import douyin_browser
 
 _LOGIN_URL = "https://www.douyin.com/"
 
-# 登录成功的判定：浏览器里出现这些 Cookie 即认为扫码登录完成
-_LOGIN_COOKIE_KEYS = ("sessionid", "sessionid_ss")
+# 登录成功的判定：浏览器里出现这些 Cookie 即认为扫码登录完成。
+# 抖音网页版会话 Cookie 已由 sessionid 迁移为 sid_tt 等，需一并识别，
+# 否则扫码成功后轮询检测不到登录态。
+_LOGIN_COOKIE_KEYS = (
+    "sessionid",
+    "sessionid_ss",
+    "sid_tt",
+    "sid_guard",
+    "uid_tt",
+    "uid_tt_ss",
+)
 
 # 判定二维码失效的关键词（出现在页面文案里）
 _QR_EXPIRED_KEYWORDS = (

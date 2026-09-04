@@ -36,8 +36,17 @@ _WIN_UA = (
     "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 
-# 登录态判定 Cookie
-_LOGIN_COOKIE_KEYS = ("sessionid", "sessionid_ss")
+# 登录态判定 Cookie。
+# 抖音网页版会话 Cookie 已由 sessionid 迁移为 sid_tt 等（旧 sessionid 会被服务端
+# 清除），仅认 sessionid 会把有效登录态误判为「已失效」。
+_LOGIN_COOKIE_KEYS = (
+    "sessionid",
+    "sessionid_ss",
+    "sid_tt",
+    "sid_guard",
+    "uid_tt",
+    "uid_tt_ss",
+)
 
 # 反自动化检测补丁：抖音登录/解析页会加载 uc-secure-tool-detect 无感验证脚本，
 # 无头浏览器若不伪装（navigator.platform 暴露 Linux 与 Windows UA 矛盾、
@@ -287,19 +296,35 @@ async def _extract_from_context(context, detail_url: str) -> dict:
                 return
             if isinstance(data, dict) and data.get("aweme_detail"):
                 captured["item"] = data["aweme_detail"]
+            else:
+                # 接口正常响应但无 aweme_detail：视频已删除/私密等不可用状态
+                captured.setdefault("empty_detail", True)
 
     try:
         page.on("response", on_response)
-        await page.goto(
-            detail_url,
-            wait_until="domcontentloaded",
-            timeout=_GOTO_TIMEOUT,
-        )
-        deadline = time.monotonic() + _POLL_TIMEOUT / 1000.0
-        while "item" not in captured and time.monotonic() < deadline:
-            await page.wait_for_timeout(500)
-        if "item" in captured:
-            return captured["item"]
+        # 登录态有效但 detail 接口未捕获多为风控/验证码临时拦截，重载页面重试一次。
+        for attempt in range(2):
+            if attempt == 0:
+                await page.goto(
+                    detail_url,
+                    wait_until="domcontentloaded",
+                    timeout=_GOTO_TIMEOUT,
+                )
+            else:
+                try:
+                    await page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=_GOTO_TIMEOUT,
+                    )
+                except Exception:
+                    pass
+            deadline = time.monotonic() + _POLL_TIMEOUT / 1000.0
+            while "item" not in captured and time.monotonic() < deadline:
+                await page.wait_for_timeout(500)
+            if "item" in captured:
+                return captured["item"]
+            if captured.get("empty_detail"):
+                raise RuntimeError("视频不存在或已删除")
         # 页面已打开但未捕获到详情接口：区分「登录态失效」与「风控/验证码」，
         # 给上层（插件）一个可识别的失效信号，便于提醒用户重新扫码登录。
         cookies = await context.cookies()
@@ -374,16 +399,24 @@ async def get_cookies() -> Optional[list]:
 
 
 async def is_logged_in() -> bool:
-    """判断常驻浏览器 profile 当前是否已登录抖音（首页 DOM 判定）。
+    """判断常驻浏览器 profile 当前是否已登录抖音（Cookie 快判 + 首页 DOM 校验）。
 
     profile/self 接口在无头 + 风控环境下并不可靠：即使实际已登录，接口也可能
-    返回 status_code=8「用户未登录」，造成「已登录被误判为未登录」。故改为直接
-    校验首页 DOM 的登录区：
-      已登录 -> 页面右上角出现「退出登录」菜单项（未登录时不会渲染）；
-      未登录 -> 页面右上角存在可见的「登录」入口。
-    最后回退到 sessionid cookie 是否存在。
+    返回 status_code=8「用户未登录」，造成「已登录被误判为未登录」。故采用：
+      1. 无任何登录 Cookie（sessionid/sid_tt 等）-> 必然未登录，无需加载页面；
+      2. 有登录 Cookie 时校验首页 DOM：出现「退出登录」菜单项 -> 已登录；
+         存在可见「登录」入口（会话被服务端作废）-> 未登录；
+      3. 其余情况信任登录 Cookie，视为已登录。
     """
     async def _check(ctx):
+        try:
+            cookies = await ctx.cookies()
+        except Exception:
+            cookies = []
+        names = {c.get("name") for c in cookies if isinstance(c, dict)}
+        if not (set(_LOGIN_COOKIE_KEYS) & names):
+            return False
+
         page = await ctx.new_page()
         try:
             # 预热首页，等待右上角登录区完成渲染
@@ -408,7 +441,8 @@ async def is_logged_in() -> bool:
             if text and "退出登录" in text:
                 return True
 
-            # 未登录：右上角存在可见的「登录」入口。
+            # 会话 Cookie 存在但可能已被服务端作废：右上角出现可见「登录」入口
+            # 即视为未登录。
             for sel in (
                 "button:has-text('登录')",
                 "a:has-text('登录')",
@@ -421,13 +455,7 @@ async def is_logged_in() -> bool:
                 except Exception:
                     continue
 
-            # 兜底：存在 sessionid 即视为已登录。
-            try:
-                cookies = await ctx.cookies()
-            except Exception:
-                cookies = []
-            names = {c.get("name") for c in cookies if isinstance(c, dict)}
-            return bool(set(_LOGIN_COOKIE_KEYS) & names)
+            return True
         except Exception:
             return False
         finally:
