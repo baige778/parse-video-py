@@ -107,7 +107,7 @@ Python 短视频 / 图集去水印解析服务
 ```bash
 docker pull ghcr.io/baige778/parse-video-py:latest
 # 或指定版本
-docker pull ghcr.io/baige778/parse-video-py:v0.0.13
+docker pull ghcr.io/baige778/parse-video-py:v0.0.14
 ```
 
 > 公开仓库的 GHCR 镜像可匿名拉取；若提示未授权，先

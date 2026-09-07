@@ -46,6 +46,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
           labels: |
             org.opencontainers.image.title=parse-video-py
             org.opencontainers.image.description=Python 短视频/图集去水印解析服务（26 平台视频 · 5 平台图集 · LivePhoto · Web API / CLI / MCP）
