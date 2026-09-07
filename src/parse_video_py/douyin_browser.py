@@ -325,13 +325,23 @@ async def _extract_from_context(context, detail_url: str) -> dict:
                 return captured["item"]
             if captured.get("empty_detail"):
                 raise RuntimeError("视频不存在或已删除")
-        # 页面已打开但未捕获到详情接口：区分「登录态失效」与「风控/验证码」，
-        # 给上层（插件）一个可识别的失效信号，便于提醒用户重新扫码登录。
+        # 页面已打开但未捕获到详情接口：区分「登录态失效」「验证码拦截」与
+        # 「视频观看限制」，给上层（插件）可识别的信号。
         cookies = await context.cookies()
         names = {c.get("name") for c in cookies if isinstance(c, dict)}
         if not (set(_LOGIN_COOKIE_KEYS) & names):
             raise RuntimeError("抖音登录态已失效，请重新扫描二维码登录")
-        raise RuntimeError("页面已打开，但未捕获到视频详情接口（可能触发验证码）")
+        try:
+            text = await page.evaluate(
+                "() => document.body ? document.body.textContent : ''"
+            )
+        except Exception:
+            text = ""
+        if any(k in (text or "") for k in ("安全验证", "滑动验证", "拖动滑块", "拼图验证")):
+            raise RuntimeError("页面已打开，但未捕获到视频详情接口（可能触发验证码）")
+        # 页面正常加载但 detail 接口始终未发起：视频在网页端被限制观看
+        # （审核中 / 仅 App 可见 / 需登录或特定权限），网页渠道拿不到数据。
+        raise RuntimeError("视频存在观看限制（审核中/仅App可见/需登录等），暂无法解析")
     finally:
         try:
             await page.close()

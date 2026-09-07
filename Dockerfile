@@ -8,9 +8,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 #     --build-arg PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
 ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
 ARG PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
+# PyPI 镜像：直连 files.pythonhosted.org 在部分家宽环境会被断连，
+# 导致 uv pip install 重试失败、构建卡死。
+ARG PYPI_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 # 默认安装无头 Chromium（抖音扫码登录依赖），不需要时构建加 --build-arg INSTALL_BROWSER=0
 ARG INSTALL_BROWSER=1
 ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST} \
+    UV_DEFAULT_INDEX=${PYPI_MIRROR} \
     DEBIAN_FRONTEND=noninteractive \
     PIP_DEFAULT_TIMEOUT=100
 
