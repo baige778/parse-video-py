@@ -1,12 +1,17 @@
 import json
 import os
 import re
+import sys
 import time
 from typing import Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from ..utils import create_async_client
 from .base import BaseParser, ImgInfo, VideoAuthor, VideoInfo
+
+
+def _log(tag: str, msg: str) -> None:
+    print(f"[parse-video-py][douyin][{tag}] {msg}", file=sys.stderr, flush=True)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -76,9 +81,40 @@ class DouYin(BaseParser):
                     f"抖音原生解析失败({type(native_exc).__name__}): {native_exc}\n"
                     f"兜底解析也失败({type(fb_exc).__name__}): {fb_exc}"
                 ) from fb_exc
+        else:
+            info = await self._enrich_album_live_photo(video_id, info)
 
         _cache_set(video_id, info)
         return info
+
+    @staticmethod
+    def _album_missing_live_photo(info: VideoInfo) -> bool:
+        """原生返回图集但所有图片均无动图视频地址（疑似命中风控精简数据）。"""
+        return bool(info.images) and all(
+            not img.live_photo_url for img in info.images
+        )
+
+    async def _enrich_album_live_photo(
+        self, video_id: str, native_info: VideoInfo
+    ) -> VideoInfo:
+        """原生图集缺少动图（实况图）视频地址时，用浏览器兜底取完整数据补全。
+
+        仅对「图集且无 live_photo_url」的结果触发，普通视频与完整原生数据不受影响；
+        兜底失败或未取到动图地址时保持原生结果。
+        """
+        if not video_id or not self._album_missing_live_photo(native_info):
+            return native_info
+        try:
+            from .douyin_fallback import parse_douyin_fallback
+
+            fb_info = await parse_douyin_fallback(video_id)
+        except Exception as exc:
+            _log("livephoto", f"动图补全失败，使用原生结果: {exc}")
+            return native_info
+        if fb_info.images and any(img.live_photo_url for img in fb_info.images):
+            _log("livephoto", "原生图集缺少动图地址，已用浏览器兜底补全")
+            return fb_info
+        return native_info
 
     async def _resolve_video_id(self, share_url: str) -> str:
         """从分享链接解析视频 ID；短链需一次请求，PC 链接为本地解析。失败返回空串。"""

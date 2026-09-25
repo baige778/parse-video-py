@@ -184,3 +184,37 @@ confidence: high
 ### 未确认事项
 
 - 无
+
+## 流程：抖音解析（原生 + 浏览器兜底 + 动图补全）
+
+### 是否已确认
+
+- 状态：已确认
+- 证据来源：`parser/douyin.py:53-117`、`parser/douyin_fallback.py`、`douyin_browser.py`；2026-09-25 实测（动图笔记 aweme_type=68，detail 接口 `images[i].video.play_addr` 含 mp4）
+
+### 执行链路
+
+1. `parse_share_url()` 先 `_resolve_video_id()`（短链一次请求，PC 链接本地解析），命中进程内缓存（`PARSE_VIDEO_PY_DOUYIN_CACHE_TTL`，默认 300s）直接返回
+2. 原生路径 `_parse_share_url_native()`：请求 `iesdouyin.com/share/video/{id}/`，解析 `window._ROUTER_DATA` 的 `video_(id)/page` / `note_(id)/page`，提取视频或图集（图集图片的 `video.play_addr.url_list` 作为 `live_photo_url`）
+3. 原生抛异常 → `douyin_fallback.parse_douyin_fallback()`：常驻持久化 Chromium 打开 PC 页，捕获 `/aweme/v1/web/aweme/detail/` 接口响应取完整数据
+4. 原生成功但结果为「图集且所有图片均无 `live_photo_url`」→ `_enrich_album_live_photo()` 再走一次浏览器兜底补全（风控概率性返回精简 SSR，图集不含动图视频地址）；兜底取到动图地址则用兜底结果，否则保持原生结果
+5. 结果写入缓存返回
+
+### 关键代码
+
+| 函数 | 职责 | 来源 |
+|---|---|---|
+| `parse_share_url()` | 入口：缓存 → 原生 → 兜底 → 动图补全 | `parser/douyin.py:53` |
+| `_enrich_album_live_photo()` | 精简数据图集的动图地址补全 | `parser/douyin.py:97` |
+| `parse_douyin_fallback()` | 浏览器兜底解析 | `parser/douyin_fallback.py` |
+| `DouyinBrowserManager` | 常驻浏览器单例（锁/TTL 回收/stealth/首页预热） | `douyin_browser.py` |
+
+### 修改风险
+
+- 动图补全只对「图集且无 live_photo_url」触发；不要把补全扩展到普通视频，会拖慢主链路
+- 原生路径超时 `_NATIVE_TIMEOUT` 默认 3s，调大会延迟兜底接管
+- 浏览器兜底依赖 `/data/browser_profile` 持久化登录态，登录失效需走 `/douyin/login/*` 扫码
+
+### 未确认事项
+
+- 风控返回精简 SSR 的概率与触发条件未知（实测同一出口 IP 短时间内时通时不通）
