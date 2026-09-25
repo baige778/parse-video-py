@@ -57,6 +57,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          # GitHub Actions 为海外网络：npmmirror 的 CFT 目录缺失 linux-arm64 Chromium（404），
+          # 置空后回退 Playwright 官方下载源；国内本地构建仍走 Dockerfile 默认镜像源。
+          build-args: |
+            PLAYWRIGHT_DOWNLOAD_HOST=
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
