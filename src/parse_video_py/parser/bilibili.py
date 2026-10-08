@@ -18,6 +18,19 @@ class BiliBili(BaseParser):
         "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
     )
 
+    _NON_VIDEO_PATH_HINTS = {
+        "bangumi": "B站番剧",
+        "cheese": "B站课程",
+        "read": "B站专栏",
+        "opus": "B站动态",
+        "toy": "B站互动玩具",
+        "space": "B站个人空间",
+        "channel": "B站频道",
+        "live": "B站直播",
+        "activity": "B站活动",
+        "game": "B站游戏中心",
+    }
+
     def get_default_headers(self) -> dict:
         headers = {
             "User-Agent": self.USER_AGENT,
@@ -72,7 +85,7 @@ class BiliBili(BaseParser):
             title=data.get("title", ""),
             video_url=video_url,
             cover_url=data.get("pic", ""),
-            images=[],  # 空的图片列表
+            images=[],
         )
 
         # 设置作者信息
@@ -86,14 +99,13 @@ class BiliBili(BaseParser):
         return video_info
 
     async def _get_bvid_from_url(self, raw_url: str) -> str:
-        """从URL中提取BVID"""
+        """从URL中提取BVID，支持BV号和av号"""
         try:
             parsed_url = urlparse(raw_url)
         except Exception:
             raise ValueError("URL格式无效")
 
         if "b23.tv" in parsed_url.netloc:
-            # 处理短链接
             async with create_async_client(follow_redirects=False) as client:
                 resp = await client.get(raw_url, headers=self.get_default_headers())
                 location = resp.headers.get("location")
@@ -107,8 +119,27 @@ class BiliBili(BaseParser):
             if len(parts) >= 2 and parts[0] == "video":
                 if parts[1].startswith("BV"):
                     return parts[1]
+                if parts[1].startswith("av"):
+                    aid = parts[1][2:]
+                    if aid.isdigit():
+                        return await self._get_bvid_from_aid(aid)
+            if len(parts) >= 1 and parts[0] in self._NON_VIDEO_PATH_HINTS:
+                hint = self._NON_VIDEO_PATH_HINTS[parts[0]]
+                raise ValueError(f"不是B站视频链接（是{hint}页面）")
 
         raise ValueError("不是有效的B站视频链接")
+
+    async def _get_bvid_from_aid(self, aid: str) -> str:
+        """通过av号(aid)获取对应的BV号"""
+        api_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
+        resp_data = await self._send_bili_request(api_url)
+        resp = json.loads(resp_data)
+        if resp.get("code") != 0:
+            raise ValueError(f"无法获取该视频: {resp.get('message', '未知错误')}")
+        bvid = resp.get("data", {}).get("bvid", "")
+        if not bvid:
+            raise ValueError("无法从av号获取BV号")
+        return bvid
 
     async def _send_bili_request(self, api_url: str) -> str:
         """发送B站API请求"""
